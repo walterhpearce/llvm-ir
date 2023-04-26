@@ -2291,6 +2291,7 @@ pub enum SynchronizationScope {
 pub enum MemoryOrdering {
     Unordered,
     Monotonic,
+    Consume, // Although this is undeclared in the headers (commented out, specifically), apparently LLVM will sometimes return this value, and it is properly handled in *some* locations of LLVM.
     Acquire,
     Release,
     AcquireRelease,
@@ -2303,6 +2304,7 @@ impl Display for MemoryOrdering {
         match self {
             MemoryOrdering::Unordered => write!(f, "unordered"),
             MemoryOrdering::Monotonic => write!(f, "monotonic"),
+            MemoryOrdering::Consume => write!(f, "consume"),
             MemoryOrdering::Acquire => write!(f, "acquire"),
             MemoryOrdering::Release => write!(f, "release"),
             MemoryOrdering::AcquireRelease => write!(f, "acq_rel"),
@@ -3307,6 +3309,10 @@ impl SynchronizationScope {
 impl MemoryOrdering {
     #[rustfmt::skip] // each one on one line, even if lines get a little long
     pub(crate) fn from_llvm(ao: LLVMAtomicOrdering) -> Self {
+        if ao as usize == 3 {
+            return MemoryOrdering::Consume;
+        }
+
         match ao {
             LLVMAtomicOrdering::LLVMAtomicOrderingUnordered => MemoryOrdering::Unordered,
             LLVMAtomicOrdering::LLVMAtomicOrderingMonotonic => MemoryOrdering::Monotonic,
