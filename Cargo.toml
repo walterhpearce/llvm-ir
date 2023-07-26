@@ -12,13 +12,13 @@ license = "MIT"
 build = "build.rs"
 
 [dependencies]
-llvm-sys-80 = { package = "llvm-sys", version = "80.3.0", optional = true }
-llvm-sys-90 = { package = "llvm-sys", version = "90.2.0", optional = true }
-llvm-sys-100 = { package = "llvm-sys", version = "100.2.0", optional = true }
-llvm-sys-110 = { package = "llvm-sys", version = "110.0.0", optional = true }
-llvm-sys-120 = { package = "llvm-sys", version = "120.2.0", optional = true }
-llvm-sys-130 = { package = "llvm-sys", version = "130.0.0", optional = true }
-llvm-sys-140 = { package = "llvm-sys", version = "140.0.0", optional = true }
+llvm-sys-80 = { package = "llvm-sys", version = "80.3.0", optional = true, features = ["prefer-dynamic"] }
+llvm-sys-90 = { package = "llvm-sys", version = "90.2.0", optional = true, features = ["prefer-dynamic"] }
+llvm-sys-100 = { package = "llvm-sys", version = "100.2.0", optional = true, features = ["prefer-dynamic"] }
+llvm-sys-110 = { package = "llvm-sys", version = "110.0.0", optional = true, features = ["prefer-dynamic"] }
+llvm-sys-120 = { package = "llvm-sys", version = "120.2.0", optional = true, features = ["prefer-dynamic"] }
+llvm-sys-130 = { package = "llvm-sys", version = "130.0.0", optional = true, features = ["prefer-dynamic"] }
+llvm-sys-140 = { package = "llvm-sys", version = "140.0.0", optional = true, features = ["prefer-dynamic"] }
 either = "1.6"
 log = "0.4"
 
