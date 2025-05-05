@@ -5,7 +5,7 @@ use crate::terminator::Terminator;
 /// A `BasicBlock` is a sequence of zero or more non-terminator instructions
 /// followed by a single terminator instruction which ends the block.
 /// Basic blocks are discussed in the [LLVM 14 docs on Functions](https://releases.llvm.org/14.0.0/docs/LangRef.html#functionstructure)
-#[derive(PartialEq, Clone, Debug)]
+#[derive(PartialEq, Clone, Debug, Hash)]
 pub struct BasicBlock {
     pub name: Name,
     pub instrs: Vec<Instruction>,
@@ -20,7 +20,6 @@ impl BasicBlock {
             name,
             instrs: vec![],
             term: Terminator::Unreachable(Unreachable {
-                #[cfg(feature = "llvm-9-or-greater")]
                 debugloc: None,
             }),
         }
@@ -116,7 +115,6 @@ fn term_needs_name(term: LLVMValueRef) -> bool {
     match unsafe { LLVMGetInstructionOpcode(term) } {
         LLVMOpcode::LLVMInvoke => true,
         LLVMOpcode::LLVMCatchSwitch => true,
-        #[cfg(feature = "llvm-9-or-greater")]
         LLVMOpcode::LLVMCallBr => true,
         _ => false, // all other terminators have no result (destination) and thus don't need names
     }

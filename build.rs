@@ -1,8 +1,5 @@
 fn main() {
     let mut versions = vec![];
-    if cfg!(feature = "llvm-8") {
-        versions.push(8);
-    }
     if cfg!(feature = "llvm-9") {
         versions.push(9);
     }
@@ -20,6 +17,21 @@ fn main() {
     }
     if cfg!(feature = "llvm-14") {
         versions.push(14);
+    }
+    if cfg!(feature = "llvm-15") {
+        versions.push(15);
+    }
+    if cfg!(feature = "llvm-16") {
+        versions.push(16);
+    }
+    if cfg!(feature = "llvm-17") {
+        versions.push(17);
+    }
+    if cfg!(feature = "llvm-18") {
+        versions.push(18);
+    }
+    if cfg!(feature = "llvm-19") {
+        versions.push(19);
     }
     match versions.len() {
         0 => panic!("llvm-ir: Please select an LLVM version using a Cargo feature."),

@@ -1,5 +1,4 @@
 use crate::constant::ConstantRef;
-#[cfg(feature = "llvm-9-or-greater")]
 use crate::debugloc::*;
 use crate::function::{Function, FunctionAttribute, FunctionDeclaration, GroupID};
 use crate::llvm_sys::*;
@@ -7,7 +6,6 @@ use crate::name::Name;
 use crate::types::{FPType, Type, TypeRef, Typed, Types, TypesBuilder};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
-use std::ptr::null_mut;
 
 /// See [LLVM 14 docs on Module Structure](https://releases.llvm.org/14.0.0/docs/LangRef.html#module-structure)
 #[derive(Clone)]
@@ -30,6 +28,8 @@ pub struct Module {
     pub global_vars: Vec<GlobalVariable>,
     /// See [LLVM 14 docs on Global Aliases](https://releases.llvm.org/14.0.0/docs/LangRef.html#aliases)
     pub global_aliases: Vec<GlobalAlias>,
+    /// See [LLVM 14 docs on Global IFuncs](https://releases.llvm.org/14.0.0/docs/LangRef.html#ifuncs)
+    pub global_ifuncs: Vec<GlobalIFunc>,
     // --TODO not yet implemented-- pub function_attribute_groups: Vec<FunctionAttributeGroup>,
     /// See [LLVM 14 docs on Module-Level Inline Assembly](https://releases.llvm.org/14.0.0/docs/LangRef.html#moduleasm)
     pub inline_assembly: String,
@@ -65,16 +65,19 @@ impl Module {
         self.func_declarations.iter().find(|decl| decl.name == name)
     }
 
-    /// Get the `GlobalVariable` having the given `name` (if any).
-    /// Note that `GlobalVariable`s are named with `String`s and not `Name`s.
-    pub fn get_global_var_by_name(&self, name: &str) -> Option<&GlobalVariable> {
-        self.global_vars.iter().find(|global| &global.name == name)
+    /// Get the `GlobalVariable` having the given `Name` (if any).
+    pub fn get_global_var_by_name(&self, name: &Name) -> Option<&GlobalVariable> {
+        self.global_vars.iter().find(|global| global.name == *name)
     }
 
-    /// Get the `GlobalAlias` having the given `name` (if any).
-    /// Note that `GlobalAlias`es are named with `String`s and not `Name`s.
-    pub fn get_global_alias_by_name(&self, name: &str) -> Option<&GlobalAlias> {
-        self.global_aliases.iter().find(|global| &global.name == name)
+    /// Get the `GlobalAlias` having the given `Name` (if any).
+    pub fn get_global_alias_by_name(&self, name: &Name) -> Option<&GlobalAlias> {
+        self.global_aliases.iter().find(|global| global.name == *name)
+    }
+
+    /// Get the `GlobalIFunc` having the given `Name` (if any).
+    pub fn get_global_ifunc_by_name(&self, name: &Name) -> Option<&GlobalIFunc> {
+        self.global_ifuncs.iter().find(|global| global.name == *name)
     }
 
     /// Parse the LLVM bitcode (.bc) file at the given path to create a `Module`
@@ -83,38 +86,60 @@ impl Module {
             context_ref: LLVMContextRef,
             mem_buf: LLVMMemoryBufferRef,
             out_module: *mut LLVMModuleRef,
-        ) -> LLVMBool {
+        ) -> Result<(), String> {
             let result =
                 llvm_sys::bit_reader::LLVMParseBitcodeInContext2(context_ref, mem_buf, out_module);
             LLVMDisposeMemoryBuffer(mem_buf);
-            result
+            match result {
+                0 => Ok(()),
+                _ => Err("Failed to parse bitcode".to_owned())
+            }
         }
         Self::from_path(path, parse_bc)
     }
 
     /// Parse the LLVM text IR (.ll) file at the given path to create a `Module`
     pub fn from_ir_path(path: impl AsRef<Path>) -> Result<Self, String> {
-        unsafe fn parse_ir(
-            context_ref: LLVMContextRef,
-            mem_buf: LLVMMemoryBufferRef,
-            out_module: *mut LLVMModuleRef,
-        ) -> LLVMBool {
-            // This call takes ownership of the buffer, so we don't free it.
-            llvm_sys::ir_reader::LLVMParseIRInContext(context_ref, mem_buf, out_module, null_mut())
-        }
-        Self::from_path(path, parse_ir)
+        Self::from_path(path, Self::parse_ir)
     }
+
+    /// Parse the given string as LLVM text IR by copying to create a `Module`
+    pub fn from_ir_str(str: &str) -> Result<Self, String> {
+        let memory_buffer = unsafe {
+            LLVMCreateMemoryBufferWithMemoryRangeCopy(
+                str.as_ptr() as *const _,
+                str.len(),
+                std::ffi::CString::default().as_ptr(),
+            )
+        };
+        Self::from_buffer(memory_buffer, Self::parse_ir)
+    }
+
+    unsafe fn parse_ir(
+        context_ref: LLVMContextRef,
+        mem_buf: LLVMMemoryBufferRef,
+        out_module: *mut LLVMModuleRef,
+    ) -> Result<(), String> {
+        use std::ffi::CStr;
+        let mut err_string = std::mem::zeroed();
+        // This call takes ownership of the buffer, so we don't free it.
+        match llvm_sys::ir_reader::LLVMParseIRInContext(context_ref, mem_buf, out_module, &mut err_string) {
+            0 => Ok(()),
+            _ => Err(format!("Failed to parse IR: {}",
+                             CStr::from_ptr(err_string).to_str().expect("Failed to convert CStr")))
+        }
+    }
+
     fn from_path(
         path: impl AsRef<Path>,
         parse: unsafe fn(
             context_ref: LLVMContextRef,
             mem_buf: LLVMMemoryBufferRef,
             out_module: *mut LLVMModuleRef,
-        ) -> LLVMBool,
+        ) -> Result<(), String>,
     ) -> Result<Self, String> {
         // implementation here inspired by the `inkwell` crate's `Module::parse_bitcode_from_path`
         use std::ffi::{CStr, CString};
-        use std::mem;
 
         let path = CString::new(
             path.as_ref()
@@ -142,14 +167,22 @@ impl Module {
         };
         debug!("Created a MemoryBuffer");
 
+        Self::from_buffer(memory_buffer, parse)
+    }
+
+    fn from_buffer(
+        memory_buffer: LLVMMemoryBufferRef,
+        parse: unsafe fn(
+            context_ref: LLVMContextRef,
+            mem_buf: LLVMMemoryBufferRef,
+            out_module: *mut LLVMModuleRef,
+        ) -> Result<(), String>,
+    ) -> Result<Self, String> {
         let context = crate::from_llvm::Context::new();
 
         let module = unsafe {
-            let mut module: mem::MaybeUninit<LLVMModuleRef> = mem::MaybeUninit::uninit();
-            let return_code = parse(context.ctx, memory_buffer, module.as_mut_ptr());
-            if return_code != 0 {
-                return Err("Failed to parse bitcode".to_string());
-            }
+            let mut module: std::mem::MaybeUninit<LLVMModuleRef> = std::mem::MaybeUninit::uninit();
+            parse(context.ctx, memory_buffer, module.as_mut_ptr())?;
             module.assume_init()
         };
         debug!("Parsed bitcode to llvm_sys module");
@@ -158,10 +191,9 @@ impl Module {
 }
 
 /// See [LLVM 14 docs on Global Variables](https://releases.llvm.org/14.0.0/docs/LangRef.html#global-variables)
-#[derive(PartialEq, Clone, Debug)]
+#[derive(PartialEq, Clone, Debug, Hash)]
 pub struct GlobalVariable {
-    /// Globals' names must be strings
-    pub name: String,
+    pub name: Name,
     pub linkage: Linkage,
     pub visibility: Visibility,
     pub is_constant: bool,
@@ -174,7 +206,6 @@ pub struct GlobalVariable {
     pub section: Option<String>,
     pub comdat: Option<Comdat>, // llvm-hs-pure has Option<String> for some reason
     pub alignment: u32,
-    #[cfg(feature = "llvm-9-or-greater")]
     pub debugloc: Option<DebugLoc>,
     // --TODO not yet implemented-- pub metadata: Vec<(String, MetadataRef<MetadataNode>)>,
 }
@@ -185,7 +216,6 @@ impl Typed for GlobalVariable {
     }
 }
 
-#[cfg(feature = "llvm-9-or-greater")]
 impl HasDebugLoc for GlobalVariable {
     fn get_debug_loc(&self) -> &Option<DebugLoc> {
         &self.debugloc
@@ -193,10 +223,9 @@ impl HasDebugLoc for GlobalVariable {
 }
 
 /// See [LLVM 14 docs on Global Aliases](https://releases.llvm.org/14.0.0/docs/LangRef.html#aliases)
-#[derive(PartialEq, Clone, Debug)]
+#[derive(PartialEq, Clone, Debug, Hash)]
 pub struct GlobalAlias {
-    /// Globals' names must be strings, so this is `String` not `Name`
-    pub name: String,
+    pub name: Name,
     pub aliasee: ConstantRef,
     pub linkage: Linkage,
     pub visibility: Visibility,
@@ -213,14 +242,30 @@ impl Typed for GlobalAlias {
     }
 }
 
-#[derive(PartialEq, Eq, Clone, Copy, Debug)]
+/// See [LLVM 14 docs on Global IFuncs](https://releases.llvm.org/14.0.0/docs/LangRef.html#ifuncs)
+#[derive(PartialEq, Clone, Debug, Hash)]
+pub struct GlobalIFunc {
+    pub name: Name,
+    pub linkage: Linkage,
+    pub visibility: Visibility,
+    pub ty: TypeRef,
+    pub resolver_fn: ConstantRef,
+}
+
+impl Typed for GlobalIFunc {
+    fn get_type(&self, _types: &Types) -> TypeRef {
+        self.ty.clone()
+    }
+}
+
+#[derive(PartialEq, Eq, Clone, Copy, Debug, Hash)]
 pub enum UnnamedAddr {
     Local,
     Global,
 }
 
 /// See [LLVM 14 docs on Linkage Types](https://releases.llvm.org/14.0.0/docs/LangRef.html#linkage)
-#[derive(PartialEq, Eq, Clone, Copy, Debug)]
+#[derive(PartialEq, Eq, Clone, Copy, Debug, Hash)]
 pub enum Linkage {
     Private,
     Internal,
@@ -242,7 +287,7 @@ pub enum Linkage {
 }
 
 /// See [LLVM 14 docs on Visibility Styles](https://releases.llvm.org/14.0.0/docs/LangRef.html#visibility-styles)
-#[derive(PartialEq, Eq, Clone, Copy, Debug)]
+#[derive(PartialEq, Eq, Clone, Copy, Debug, Hash)]
 pub enum Visibility {
     Default,
     Hidden,
@@ -250,7 +295,7 @@ pub enum Visibility {
 }
 
 /// See [LLVM 14 docs on DLL Storage Classes](https://releases.llvm.org/14.0.0/docs/LangRef.html#dllstorageclass)
-#[derive(PartialEq, Eq, Clone, Copy, Debug)]
+#[derive(PartialEq, Eq, Clone, Copy, Debug, Hash)]
 pub enum DLLStorageClass {
     Default,
     Import,
@@ -258,7 +303,7 @@ pub enum DLLStorageClass {
 }
 
 /// See [LLVM 14 docs on Thread Local Storage Models](https://releases.llvm.org/14.0.0/docs/LangRef.html#thread-local-storage-models)
-#[derive(PartialEq, Eq, Clone, Copy, Debug)]
+#[derive(PartialEq, Eq, Clone, Copy, Debug, Hash)]
 pub enum ThreadLocalMode {
     NotThreadLocal,
     GeneralDynamic,
@@ -271,7 +316,7 @@ pub enum ThreadLocalMode {
 pub type AddrSpace = u32;
 
 /// See [LLVM 14 docs on Attribute Groups](https://releases.llvm.org/14.0.0/docs/LangRef.html#attribute-groups)
-#[derive(PartialEq, Eq, Clone, Debug)]
+#[derive(PartialEq, Eq, Clone, Debug, Hash)]
 pub struct FunctionAttributeGroup {
     pub group_id: GroupID,
     pub attrs: Vec<FunctionAttribute>,
@@ -279,7 +324,7 @@ pub struct FunctionAttributeGroup {
 
 /* --TODO not yet implemented: metadata
 /// See [LLVM 14 docs on Named Metadata](https://releases.llvm.org/14.0.0/docs/LangRef.html#named-metadata)
-#[derive(PartialEq, Eq, Clone, Debug)]
+#[derive(PartialEq, Eq, Clone, Debug, Hash)]
 pub struct NamedMetadata {
     pub name: String,
     pub node_ids: Vec<MetadataNodeID>,
@@ -287,13 +332,13 @@ pub struct NamedMetadata {
 */
 
 /// See [LLVM 14 docs on Comdats](https://releases.llvm.org/14.0.0/docs/LangRef.html#langref-comdats)
-#[derive(PartialEq, Eq, Clone, Debug)]
+#[derive(PartialEq, Eq, Clone, Debug, Hash)]
 pub struct Comdat {
     pub name: String,
     pub selection_kind: SelectionKind,
 }
 
-#[derive(PartialEq, Eq, Clone, Copy, Debug)]
+#[derive(PartialEq, Eq, Clone, Copy, Debug, Hash)]
 pub enum SelectionKind {
     Any,
     ExactMatch,
@@ -334,7 +379,7 @@ impl PartialEq for DataLayout {
 
 impl Eq for DataLayout {}
 
-#[derive(PartialEq, Eq, Clone, Copy, Debug)]
+#[derive(PartialEq, Eq, Clone, Copy, Debug, Hash)]
 pub enum Endianness {
     /// Least-significant bits are stored in the lowest address location
     LittleEndian,
@@ -344,7 +389,7 @@ pub enum Endianness {
 
 /// Alignment details for a type.
 /// See [LLVM 14 docs on Data Layout](https://releases.llvm.org/14.0.0/docs/LangRef.html#data-layout)
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug, Hash)]
 pub struct Alignment {
     /// Minimum alignment (in bits) per the ABI
     pub abi: u32,
@@ -354,8 +399,7 @@ pub struct Alignment {
 
 /// Alignment details for function pointers.
 /// See [LLVM 14 docs on Data Layout](https://releases.llvm.org/14.0.0/docs/LangRef.html#data-layout)
-#[cfg(feature = "llvm-9-or-greater")]
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug, Hash)]
 pub struct FunctionPtrAlignment {
     /// If `true`, function pointer alignment is independent of function alignment.
     /// If `false`, function pointer alignment is a multiple of function alignment.
@@ -366,7 +410,7 @@ pub struct FunctionPtrAlignment {
 
 /// Layout details for pointers (other than function pointers).
 /// See [LLVM 14 docs on Data Layout](https://releases.llvm.org/14.0.0/docs/LangRef.html#data-layout)
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug, Hash)]
 pub struct PointerLayout {
     /// Size of a pointer in bits
     pub size: u32,
@@ -393,10 +437,8 @@ pub struct Alignments {
     /// Alignment for aggregate types (structs, arrays)
     agg_alignment: Alignment,
     /// Alignment for function pointers
-    #[cfg(feature = "llvm-9-or-greater")]
     fptr_alignment: FunctionPtrAlignment,
     /// Alignment for function pointers, as an `Alignment`
-    #[cfg(feature = "llvm-9-or-greater")]
     fptr_alignment_as_alignment: Alignment,
     /// Layout details for (non-function-pointer) pointers, by address space
     pointer_layouts: HashMap<AddrSpace, PointerLayout>,
@@ -423,14 +465,16 @@ impl Alignments {
             Type::StructType { .. } | Type::NamedStructType { .. } | Type::ArrayType { .. } => {
                 self.agg_alignment()
             },
+            #[cfg(feature = "llvm-14-or-lower")]
             Type::PointerType {
                 pointee_type,
                 addr_space,
             } => match pointee_type.as_ref() {
-                #[cfg(feature = "llvm-9-or-greater")]
                 Type::FuncType { .. } => &self.fptr_alignment_as_alignment,
                 _ => &self.ptr_alignment(*addr_space).alignment,
             },
+            #[cfg(feature = "llvm-15-or-greater")]
+            Type::PointerType { addr_space } => &self.ptr_alignment(*addr_space).alignment,
             _ => panic!("Don't know how to get the alignment of {:?}", ty),
         }
     }
@@ -496,7 +540,6 @@ impl Alignments {
     }
 
     /// Alignment of function pointers
-    #[cfg(feature = "llvm-9-or-greater")]
     pub fn fptr_alignment(&self) -> &FunctionPtrAlignment {
         &self.fptr_alignment
     }
@@ -528,7 +571,7 @@ impl Alignments {
 }
 
 /// See [LLVM 14 docs on Data Layout](https://releases.llvm.org/14.0.0/docs/LangRef.html#data-layout)
-#[derive(PartialEq, Eq, Clone, Copy, Debug)]
+#[derive(PartialEq, Eq, Clone, Copy, Debug, Hash)]
 pub enum Mangling {
     ELF,
     MIPS,
@@ -589,9 +632,9 @@ impl Module {
         let mut global_ctr = 0; // this ctr is used to number global objects that aren't named
 
         // Modules require two passes over their contents.
-        // First we make a pass just to map global objects -- in particular, Functions,
-        //   GlobalVariables, and GlobalAliases -- to Names; then we do the actual
-        //   detailed pass.
+        // First we make a pass just to map global objects -- in particular,
+        //   Functions, GlobalVariables, GlobalAliases, and GlobalIFuncs -- to
+        //   Names; then we do the actual detailed pass.
         // This is necessary because these structures may reference each other in a
         //   circular fashion, and we need to be able to fill in the Name of the
         //   referenced object from having only its `LLVMValueRef`.
@@ -601,6 +644,7 @@ impl Module {
             .chain(get_declared_functions(module))
             .chain(get_globals(module))
             .chain(get_global_aliases(module))
+            .chain(get_global_ifuncs(module))
             .map(|g| {
                 (
                     g,
@@ -629,6 +673,9 @@ impl Module {
             global_aliases: get_global_aliases(module)
                 .map(|g| GlobalAlias::from_llvm_ref(g, &mut global_ctr, &mut ctx))
                 .collect(),
+            global_ifuncs: get_global_ifuncs(module)
+                .map(|g| GlobalIFunc::from_llvm_ref(g, &mut global_ctr, &mut ctx))
+                .collect(),
             // function_attribute_groups: unimplemented!("function_attribute_groups"),  // llvm-hs collects these in the decoder monad or something
             inline_assembly: unsafe { get_module_inline_asm(module) },
             // metadata_nodes: unimplemented!("metadata_nodes"),
@@ -652,12 +699,7 @@ impl GlobalVariable {
         };
         debug!("Processing a GlobalVariable with type {:?}", ty);
         Self {
-            name: {
-                match Name::name_or_num(unsafe { get_value_name(global) }, ctr) {
-                    Name::Name(s) => *s,
-                    Name::Number(n) => panic!("expected global variable to have a string name, but instead it has the number {}", n),
-                }
-            },
+            name: Name::name_or_num(unsafe { get_value_name(global) }, ctr),
             linkage: Linkage::from_llvm(unsafe { LLVMGetLinkage(global) }),
             visibility: Visibility::from_llvm(unsafe { LLVMGetVisibility(global) }),
             is_constant: unsafe { LLVMIsGlobalConstant(global) } != 0,
@@ -688,7 +730,6 @@ impl GlobalVariable {
                 }
             },
             alignment: unsafe { LLVMGetAlignment(global) },
-            #[cfg(feature = "llvm-9-or-greater")]
             debugloc: DebugLoc::from_llvm_no_col(global),
             // metadata: unimplemented!("metadata"),
         }
@@ -707,10 +748,7 @@ impl GlobalAlias {
             _ => panic!("GlobalAlias has a non-pointer type, {:?}", ty),
         };
         Self {
-            name: match Name::name_or_num(unsafe { get_value_name(alias) }, ctr) {
-                Name::Name(s) => *s,
-                Name::Number(n) => panic!("expected global alias to have a string name, but instead it has the number {}", n),
-            },
+            name: Name::name_or_num(unsafe { get_value_name(alias) }, ctr),
             aliasee: Constant::from_llvm_ref(unsafe { LLVMAliasGetAliasee(alias) }, ctx),
             linkage: Linkage::from_llvm(unsafe { LLVMGetLinkage(alias) }),
             visibility: Visibility::from_llvm(unsafe { LLVMGetVisibility(alias) }),
@@ -719,6 +757,22 @@ impl GlobalAlias {
             dll_storage_class: DLLStorageClass::from_llvm(unsafe { LLVMGetDLLStorageClass(alias) }),
             thread_local_mode: ThreadLocalMode::from_llvm(unsafe { LLVMGetThreadLocalMode(alias) }),
             unnamed_addr: UnnamedAddr::from_llvm(unsafe { LLVMGetUnnamedAddress(alias) }),
+        }
+    }
+}
+
+impl GlobalIFunc {
+    pub(crate) fn from_llvm_ref(
+        ifunc: LLVMValueRef,
+        ctr: &mut usize,
+        ctx: &mut ModuleContext,
+    ) -> Self {
+        Self {
+            name: Name::name_or_num(unsafe { get_value_name(ifunc) }, ctr),
+            linkage: Linkage::from_llvm(unsafe { LLVMGetLinkage(ifunc) }),
+            visibility: Visibility::from_llvm(unsafe { LLVMGetVisibility(ifunc) }),
+            ty: ctx.types.type_from_llvm_ref(unsafe { LLVMTypeOf(ifunc) }),
+            resolver_fn: Constant::from_llvm_ref(unsafe { LLVMGetGlobalIFuncResolver(ifunc) }, ctx),
         }
     }
 }
@@ -998,39 +1052,25 @@ impl DataLayout {
                 assert!(chunks.next().is_none(), "datalayout 'a': Too many chunks");
                 data_layout.alignments.agg_alignment = Alignment { abi, pref };
             } else if let Some(stripped) = spec.strip_prefix("Fi") {
-                #[cfg(feature = "llvm-8-or-lower")]
-                {
-                    panic!("datalayout: Unknown spec {:?}", spec);
-                }
-                #[cfg(feature = "llvm-9-or-greater")]
-                {
-                    let abi: u32 = stripped
-                        .parse()
-                        .expect("datalayout 'Fi': Failed to parse abi");
-                    data_layout.alignments.fptr_alignment = FunctionPtrAlignment {
-                        independent: true,
-                        abi,
-                    };
-                    data_layout.alignments.fptr_alignment_as_alignment =
-                        Alignment { abi, pref: abi };
-                }
+                let abi: u32 = stripped
+                    .parse()
+                    .expect("datalayout 'Fi': Failed to parse abi");
+                data_layout.alignments.fptr_alignment = FunctionPtrAlignment {
+                    independent: true,
+                    abi,
+                };
+                data_layout.alignments.fptr_alignment_as_alignment =
+                    Alignment { abi, pref: abi };
             } else if let Some(stripped) = spec.strip_prefix("Fn") {
-                #[cfg(feature = "llvm-8-or-lower")]
-                {
-                    panic!("datalayout: Unknown spec {:?}", spec);
-                }
-                #[cfg(feature = "llvm-9-or-greater")]
-                {
-                    let abi: u32 = stripped
-                        .parse()
-                        .expect("datalayout 'Fn': Failed to parse abi");
-                    data_layout.alignments.fptr_alignment = FunctionPtrAlignment {
-                        independent: false,
-                        abi,
-                    };
-                    data_layout.alignments.fptr_alignment_as_alignment =
-                        Alignment { abi, pref: abi };
-                }
+                let abi: u32 = stripped
+                    .parse()
+                    .expect("datalayout 'Fn': Failed to parse abi");
+                data_layout.alignments.fptr_alignment = FunctionPtrAlignment {
+                    independent: false,
+                    abi,
+                };
+                data_layout.alignments.fptr_alignment_as_alignment =
+                    Alignment { abi, pref: abi };
             } else if spec.starts_with('m') {
                 let mut chunks = spec.split(':');
                 let first_chunk = chunks.next().unwrap();
@@ -1088,9 +1128,9 @@ impl DataLayout {
 impl Default for Alignments {
     fn default() -> Self {
         Self {
-            /// Explicit alignments for various sizes of integers (in bits). Sizes not
-            /// specified here are determined according to the rules described in the
-            /// Data Layout docs.
+            // Explicit alignments for various sizes of integers (in bits). Sizes not
+            // specified here are determined according to the rules described in the
+            // Data Layout docs.
             int_alignments: vec![
                 (1, Alignment { abi: 8, pref: 8 }),
                 (8, Alignment { abi: 8, pref: 8 }),
@@ -1100,9 +1140,9 @@ impl Default for Alignments {
             ]
             .into_iter()
             .collect(),
-            /// Explicit alignments for various sizes of vectors (in bits). Sizes not
-            /// specified here are determined according to the rules described in the
-            /// Data Layout docs.
+            // Explicit alignments for various sizes of vectors (in bits). Sizes not
+            // specified here are determined according to the rules described in the
+            // Data Layout docs.
             vec_alignments: vec![
                 (64, Alignment { abi: 64, pref: 64 }),
                 (
@@ -1115,7 +1155,7 @@ impl Default for Alignments {
             ]
             .into_iter()
             .collect(),
-            /// Alignment for floating-point types, by size (in bits)
+            // Alignment for floating-point types, by size (in bits)
             fp_alignments: vec![
                 (16, Alignment { abi: 16, pref: 16 }),
                 (32, Alignment { abi: 32, pref: 32 }),
@@ -1130,18 +1170,16 @@ impl Default for Alignments {
             ]
             .into_iter()
             .collect(),
-            /// Alignment for aggregate types (structs, arrays)
+            // Alignment for aggregate types (structs, arrays)
             agg_alignment: Alignment { abi: 0, pref: 64 },
-            /// Alignment for function pointers
-            #[cfg(feature = "llvm-9-or-greater")]
+            // Alignment for function pointers
             fptr_alignment: FunctionPtrAlignment {
                 independent: true,
                 abi: 64,
             },
-            /// Alignment for function pointers, as an `Alignment`
-            #[cfg(feature = "llvm-9-or-greater")]
+            // Alignment for function pointers, as an `Alignment`
             fptr_alignment_as_alignment: Alignment { abi: 64, pref: 64 },
-            /// Layout details for (non-function-pointer) pointers, by address space
+            // Layout details for (non-function-pointer) pointers, by address space
             pointer_layouts: vec![(
                 0,
                 PointerLayout {

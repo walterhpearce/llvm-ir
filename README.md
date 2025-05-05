@@ -37,15 +37,16 @@ add it as a dependency in your `Cargo.toml`, selecting the feature corresponding
 to the LLVM version you want:
 ```toml
 [dependencies]
-llvm-ir = { version = "0.8.2", features = ["llvm-14"] }
+llvm-ir = { version = "0.11.3", features = ["llvm-19"] }
 ```
 
-Currently, the supported LLVM versions are `llvm-8`, `llvm-9`, `llvm-10`,
-`llvm-11`, `llvm-12`, `llvm-13`, and `llvm-14`.
+Currently, the supported LLVM versions are `llvm-9`, `llvm-10`, `llvm-11`,
+`llvm-12`, `llvm-13`, `llvm-14`, `llvm-15`, `llvm-16`, `llvm-17`, `llvm-18`,
+and `llvm-19`.
 
 Then, the easiest way to get started is to parse some existing LLVM IR into
 this crate's data structures.
-To do this, you need LLVM bitcode (`*.bc`) files.
+To do this, you need LLVM bitcode (`*.bc`) or text-format IR (`*.ll`) files.
 If you currently have C/C++ sources (say, `source.c`), you can generate
 `*.bc` files with `clang`'s `-c` and `-emit-llvm` flags:
 ```bash
@@ -61,6 +62,7 @@ In either case, once you have a bitcode file, then you can use `llvm-ir`'s
 use llvm_ir::Module;
 let module = Module::from_bc_path("path/to/my/file.bc")?;
 ```
+or if you have a text-format IR file, you can use `Module::from_ir_path()`.
 
 You may also be interested in the [`llvm-ir-analysis`] crate, which computes
 control-flow graphs, dominator trees, etc for `llvm-ir` functions.
@@ -82,10 +84,17 @@ using.
 ## Compatibility
 Starting with `llvm-ir` 0.7.0, LLVM versions are selected by a Cargo feature
 flag. This means that a single crate version can be used for any supported LLVM
-version. Currently, `llvm-ir` supports LLVM versions 8 through 14, selected by
-feature flags `llvm-8` through `llvm-14`.
+version. Currently, `llvm-ir` supports LLVM versions 9 through 19, selected by
+feature flags `llvm-9` through `llvm-19`.
 
-`llvm-ir` works on stable Rust, and requires Rust 1.45+.
+You should select the LLVM version corresponding to the version of the LLVM
+library you are linking against (i.e., that is available on your system.)
+Newer LLVMs should be able to read bitcode produced by older LLVMs, so you
+should be able to use this crate to parse bitcode older than the LLVM version
+you select via crate feature, even bitcode produced by LLVMs older than LLVM 9.
+However, this is not extensively tested by us.
+
+`llvm-ir` works on stable Rust. As of this writing, it requires Rust 1.65+.
 
 ## Development/Debugging
 For development or debugging, you may want LLVM text-format (`*.ll`) files in
@@ -118,30 +127,28 @@ source locations), but makes no attempt to recover any other debug metadata.
 LLVM files containing metadata can still be parsed in with no problems, but
 the resulting `Module` structures will not contain any of the metadata,
 except debug locations.
-Work-in-progress on fixing this can be found on the `metadata` branch of this
-repo, but be warned that the `metadata` branch doesn't even build at the time
-of this writing, let alone provide any meaningful functionality for crate
-users.
 
 A few other features are missing from `llvm-ir`'s data structures because
 getters for them are missing from the LLVM C API and the Rust `llvm-sys`
 crate, only being present in the LLVM C++ API.
 These include but are not limited to:
 
-- the `nsw` and `nuw` flags on `Add`, `Sub`, `Mul`, and `Shl`, and likewise
-the `exact` flag on `UDiv`, `SDiv`, `LShr`, and `AShr`. The C API has
-functionality to create new instructions specifying values of these flags,
-but not to query the values of these flags on existing instructions.
 - the "fast-math flags" on various floating-point operations
 - contents of inline assembly functions
 - information about the clauses in the variadic `LandingPad` instruction
 - information about the operands of a `BlockAddress` constant expression
-- the ["prefix data"](https://releases.llvm.org/14.0.0/docs/LangRef.html#prefix-data)
+- information about `TargetExtType` types
+- the ["prefix data"](https://releases.llvm.org/16.0.0/docs/LangRef.html#prefix-data)
 associated with a function
 - the values of constant integers which are larger than 64 bits (and don't
 fit in 64 bits) -- see [#5](https://github.com/cdisselkoen/llvm-ir/issues/5)
 - the "other labels" reachable from a `CallBr` terminator (which was
 introduced in LLVM 9)
+- (LLVM 16 and lower -- fixed in LLVM 17 and later) the `nsw` and `nuw` flags on
+`Add`, `Sub`, `Mul`, and `Shl`, and likewise the `exact` flag on `UDiv`, `SDiv`,
+`LShr`, and `AShr`. The C API has functionality to create new instructions
+specifying values of these flags, but not to query the values of these flags on
+existing instructions.
 - (LLVM 9 and lower -- fixed in LLVM 10 and later) the opcode for the
 `AtomicRMW` instruction, i.e., `Xchg`, `Add`, `Max`, `Min`, and the like.
 
@@ -150,11 +157,10 @@ More discussion about this is in
 Any contributions to filling these gaps in the C API are greatly appreciated!
 
 ## Acknowledgments
-`llvm-ir` is heavily inspired by the [`llvm-hs-pure` Haskell package].
-Most of the data structures in `llvm-ir` are essentially translations from
-Haskell to Rust of the data structures in `llvm-hs-pure` (with some tweaks).
-To a lesser extent, `llvm-ir` borrows from the larger [`llvm-hs` Haskell
-package] as well.
+`llvm-ir` took its original inspiration from the [`llvm-hs-pure` Haskell package].
+Most of the data structures in the original release of `llvm-ir` were
+essentially translations from Haskell to Rust of the data structures in
+`llvm-hs-pure` (with some tweaks).
 
 ## Changelog for 0.7.0
 
@@ -165,9 +171,10 @@ versions, which are outlined here.
 one of the features `llvm-8`, `llvm-9`, or `llvm-10`. Previously, we had the
 `0.6.x` branch for LLVM 10, the `0.5.x` branch for LLVM 9, and didn't
 officially support LLVM 8. Now, a single release supports LLVM 8, 9, and 10.
-  - (Note: 0.7.3 and later also supports LLVM 11; 0.7.5 and later also supports
-  LLVM 12; 0.8.1 and later also supports LLVM 13; and 0.8.2 and later also
-  supports LLVM 14.)
+  - (Note: Versions of this crate beyond 0.7.0 have added support for later LLVM
+  versions as well. For instance, 0.7.3 and later also support LLVM 11; and
+  0.7.5 and later also support LLVM 12. Crate version 0.11.0 removed support
+  for LLVM 8.)
 - [`FunctionAttribute`] and [`ParameterAttribute`] are now proper enums with
 descriptive variants such as `NoInline`, `StackProtect`, etc. Previously,
 attributes were opaque numeric codes which were difficult to interpret.
@@ -188,8 +195,8 @@ number of breaking changes to the public interface:
   [`module.types.named_struct_def()`] to get the definition for any named
   struct type in the module.
 - The required Rust version increased from 1.36+ to 1.39+.
-  - (Note: 0.7.2 increased the required Rust version again, to 1.43+;
-    and 0.8.1 increased it to 1.45+.)
+  - (Note: Versions of this crate beyond 0.7.0 have increased this requirement
+  further.  For the current required Rust version, see "Compatibility" above.)
 
 [`llvm-sys`]: https://crates.io/crates/llvm-sys
 [`inkwell`]: https://github.com/TheDan64/inkwell

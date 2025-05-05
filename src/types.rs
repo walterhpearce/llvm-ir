@@ -16,10 +16,15 @@ pub enum Type {
     /// See [LLVM 14 docs on Integer Type](https://releases.llvm.org/14.0.0/docs/LangRef.html#integer-type)
     IntegerType { bits: u32 },
     /// See [LLVM 14 docs on Pointer Type](https://releases.llvm.org/14.0.0/docs/LangRef.html#pointer-type)
+    #[cfg(feature = "llvm-14-or-lower")]
     PointerType {
         pointee_type: TypeRef,
         addr_space: AddrSpace,
     },
+    /// See [LLVM 15 docs on Pointer Type](https://releases.llvm.org/15.0.0/docs/LangRef.html#pointer-type)
+    /// and [this documentation on Opaque Pointers, introduced in LLVM 15](https://releases.llvm.org/15.0.0/docs/OpaquePointers.html)
+    #[cfg(feature = "llvm-15-or-greater")]
+    PointerType { addr_space: AddrSpace },
     /// See [LLVM 14 docs on Floating-Point Types](https://releases.llvm.org/14.0.0/docs/LangRef.html#floating-point-types)
     FPType(FPType),
     /// See [LLVM 14 docs on Function Type](https://releases.llvm.org/14.0.0/docs/LangRef.html#function-type)
@@ -70,6 +75,13 @@ pub enum Type {
     LabelType,
     /// See [LLVM 14 docs on Token Type](https://releases.llvm.org/14.0.0/docs/LangRef.html#token-type)
     TokenType,
+    /// See [LLVM 16 docs on Target Extension Type](https://releases.llvm.org/16.0.0/docs/LangRef.html#target-extension-type).
+    ///
+    /// `TargetExtType` needs more fields, but the necessary getter functions
+    /// are apparently not exposed in the LLVM C API (only the C++ API).
+    /// See discussion in #39.
+    #[cfg(feature = "llvm-16-or-greater")]
+    TargetExtType, // TODO ideally we want something like TargetExtType { name: String, contained_types: Vec<TypeRef>, contained_ints: Vec<u32> }
 }
 
 impl Display for Type {
@@ -77,7 +89,10 @@ impl Display for Type {
         match self {
             Type::VoidType => write!(f, "void"),
             Type::IntegerType { bits } => write!(f, "i{}", bits),
+            #[cfg(feature = "llvm-14-or-lower")]
             Type::PointerType { pointee_type, .. } => write!(f, "{}*", pointee_type),
+            #[cfg(feature = "llvm-15-or-greater")]
+            Type::PointerType { .. } => write!(f, "ptr"),
             Type::FPType(fpt) => write!(f, "{}", fpt),
             Type::FuncType {
                 result_type,
@@ -145,6 +160,22 @@ impl Display for Type {
             Type::MetadataType => write!(f, "metadata"),
             Type::LabelType => write!(f, "label"),
             Type::TokenType => write!(f, "token"),
+            #[cfg(feature = "llvm-16-or-greater")]
+            Type::TargetExtType => write!(f, "target()"),
+                // someday if/when TargetExtType contains other fields, we need something like the below:
+                /*
+                // Name, then type parameters first then integer parameters.
+                let members = [name]
+                    .iter()
+                    .map(|name| format!("\"{name}\""))
+                    .chain(contained_types.iter().map(ToString::to_string))
+                    .chain(contained_ints.iter().map(ToString::to_string))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                write!(f, "target({members})")?;
+
+                Ok(())
+                */
         }
     }
 }
@@ -268,7 +299,11 @@ pub(crate) struct TypesBuilder {
     /// Map of integer size to `Type::IntegerType` of that size
     int_types: TypeCache<u32>,
     /// Map of (pointee type, address space) to the corresponding `Type::PointerType`
+    #[cfg(feature = "llvm-14-or-lower")]
     pointer_types: TypeCache<(TypeRef, AddrSpace)>,
+    /// Map of address space to the corresponding `Type::PointerType`
+    #[cfg(feature = "llvm-15-or-greater")]
+    pointer_types: TypeCache<AddrSpace>,
     /// Map of `FPType` to the corresponding `Type::FPType`
     fp_types: TypeCache<FPType>,
     /// Map of `(result_type, param_types, is_var_arg)` to the corresponding `Type::FunctionType`
@@ -294,6 +329,10 @@ pub(crate) struct TypesBuilder {
     label_type: TypeRef,
     /// `TypeRef` to `Type::TokenType`
     token_type: TypeRef,
+    /// `TypeRef` to `Type::TargetExtType`
+    // someday: Map of `(name, contained_types, contained_ints)` to the corresponding `Type::TargetExtType`. See notes on Type::TargetExtType
+    #[cfg(feature = "llvm-16-or-greater")]
+    target_ext_type: TypeRef,
     /// internal cache of already-seen `LLVMTypeRef`s so we can quickly produce
     /// the corresponding `TypeRef` without re-parsing the type
     llvm_type_map: HashMap<LLVMTypeRef, TypeRef>,
@@ -318,6 +357,8 @@ impl TypesBuilder {
             metadata_type: TypeRef::new(Type::MetadataType),
             label_type: TypeRef::new(Type::LabelType),
             token_type: TypeRef::new(Type::TokenType),
+            #[cfg(feature = "llvm-16-or-greater")]
+            target_ext_type: TypeRef::new(Type::TargetExtType),
             llvm_type_map: HashMap::new(),
         }
     }
@@ -343,6 +384,8 @@ impl TypesBuilder {
             metadata_type: self.metadata_type,
             label_type: self.label_type,
             token_type: self.token_type,
+            #[cfg(feature = "llvm-16-or-greater")]
+            target_ext_type: self.target_ext_type,
         }
     }
 }
@@ -387,11 +430,18 @@ impl TypesBuilder {
     }
 
     /// Get a pointer type in the default address space (`0`)
+    #[cfg(feature = "llvm-14-or-lower")]
     pub fn pointer_to(&mut self, pointee_type: TypeRef) -> TypeRef {
         self.pointer_in_addr_space(pointee_type, 0) // default to address space 0
     }
+    /// Get the pointer type for the default address space (`0`)
+    #[cfg(feature = "llvm-15-or-greater")]
+    pub fn pointer(&mut self) -> TypeRef {
+        self.pointer_in_addr_space(0) // default to address space 0
+    }
 
     /// Get a pointer in the specified address space
+    #[cfg(feature = "llvm-14-or-lower")]
     pub fn pointer_in_addr_space(
         &mut self,
         pointee_type: TypeRef,
@@ -402,6 +452,12 @@ impl TypesBuilder {
                 pointee_type,
                 addr_space,
             })
+    }
+    /// Get a pointer in the specified address space
+    #[cfg(feature = "llvm-15-or-greater")]
+    pub fn pointer_in_addr_space(&mut self, addr_space: AddrSpace) -> TypeRef {
+        self.pointer_types
+            .lookup_or_insert(addr_space, || Type::PointerType { addr_space })
     }
 
     /// Get a floating-point type
@@ -544,6 +600,17 @@ impl TypesBuilder {
     pub fn token_type(&self) -> TypeRef {
         self.token_type.clone()
     }
+
+    /// Get the target extension type
+    #[cfg(feature = "llvm-16-or-greater")]
+    pub fn target_ext_type(
+        &mut self,
+        // name: String, // TODO not exposed in the LLVM C API; see notes on Type::TargetExtType
+        // contained_types: Vec<TypeRef>, // TODO not exposed in the LLVM C API; see notes on Type::TargetExtType
+        // contained_ints: Vec<u32>, // TODO not exposed in the LLVM C API; see notes on Type::TargetExtType
+    ) -> TypeRef {
+        self.target_ext_type.clone()
+    }
 }
 
 #[derive(Clone, Debug, Hash)]
@@ -574,7 +641,11 @@ pub struct Types {
     /// Map of integer size to `Type::IntegerType` of that size
     int_types: TypeCache<u32>,
     /// Map of (pointee type, address space) to the corresponding `Type::PointerType`
+    #[cfg(feature = "llvm-14-or-lower")]
     pointer_types: TypeCache<(TypeRef, AddrSpace)>,
+    /// Map of address space to the corresponding `Type::PointerType`
+    #[cfg(feature = "llvm-15-or-greater")]
+    pointer_types: TypeCache<AddrSpace>,
     /// Map of `FPType` to the corresponding `Type::FPType`
     fp_types: TypeCache<FPType>,
     /// Map of `(result_type, param_types, is_var_arg)` to the corresponding `Type::FunctionType`
@@ -601,6 +672,9 @@ pub struct Types {
     label_type: TypeRef,
     /// `TypeRef` to `Type::TokenType`
     token_type: TypeRef,
+    /// `TypeRef` to `Type::TargetExtType`
+    #[cfg(feature = "llvm-16-or-greater")]
+    target_ext_type: TypeRef,
 }
 
 impl Types {
@@ -647,11 +721,18 @@ impl Types {
     }
 
     /// Get a pointer type in the default address space (`0`)
+    #[cfg(feature = "llvm-14-or-lower")]
     pub fn pointer_to(&self, pointee_type: TypeRef) -> TypeRef {
         self.pointer_in_addr_space(pointee_type, 0)
     }
+    /// Get the pointer type for the default address space (`0`)
+    #[cfg(feature = "llvm-15-or-greater")]
+    pub fn pointer(&self) -> TypeRef {
+        self.pointer_in_addr_space(0)
+    }
 
     /// Get a pointer type in the specified address space
+    #[cfg(feature = "llvm-14-or-lower")]
     pub fn pointer_in_addr_space(&self, pointee_type: TypeRef, addr_space: AddrSpace) -> TypeRef {
         self.pointer_types
             .lookup(&(pointee_type.clone(), addr_space))
@@ -661,6 +742,13 @@ impl Types {
                     addr_space,
                 })
             })
+    }
+    /// Get a pointer type in the specified address space
+    #[cfg(feature = "llvm-15-or-greater")]
+    pub fn pointer_in_addr_space(&self, addr_space: AddrSpace) -> TypeRef {
+        self.pointer_types
+            .lookup(&addr_space)
+            .unwrap_or_else(|| TypeRef::new(Type::PointerType { addr_space }))
     }
 
     /// Get a floating-point type
@@ -820,14 +908,31 @@ impl Types {
         self.token_type.clone()
     }
 
+    /// Get the `TypeRef` for target extension type with the given
+    /// name, contained types, and contained ints.
+    #[cfg(feature = "llvm-16-or-greater")]
+    pub fn target_ext_type(
+        &self,
+        // name: String, // TODO not exposed in the LLVM C API; see notes on Type::TargetExtType
+        // contained_types: Vec<TypeRef>, // TODO not exposed in the LLVM C API; see notes on Type::TargetExtType
+        // contained_ints: Vec<u32>, // TODO not exposed in the LLVM C API; see notes on Type::TargetExtType
+    ) -> TypeRef {
+        self.target_ext_type.clone()
+    }
+
     /// Get a `TypeRef` for the given `Type`
     #[rustfmt::skip] // so we can keep each of the match arms more consistent with each other
     pub fn get_for_type(&self, ty: &Type) -> TypeRef {
         match ty {
             Type::VoidType => self.void(),
             Type::IntegerType{ bits } => self.int(*bits),
+            #[cfg(feature = "llvm-14-or-lower")]
             Type::PointerType { pointee_type, addr_space } => {
                 self.pointer_in_addr_space(pointee_type.clone(), *addr_space)
+            },
+            #[cfg(feature = "llvm-15-or-greater")]
+            Type::PointerType { addr_space } => {
+                self.pointer_in_addr_space(*addr_space)
             },
             Type::FPType(fpt) => self.fp(*fpt),
             Type::FuncType { result_type, param_types, is_var_arg } => {
@@ -854,6 +959,8 @@ impl Types {
             Type::MetadataType => self.metadata_type(),
             Type::LabelType => self.label_type(),
             Type::TokenType => self.token_type(),
+            #[cfg(feature="llvm-16-or-greater")]
+            Type::TargetExtType => self.target_ext_type(),
         }
     }
 }
@@ -930,13 +1037,27 @@ impl TypesBuilder {
         match kind {
             LLVMTypeKind::LLVMVoidTypeKind => self.void(),
             LLVMTypeKind::LLVMIntegerTypeKind => self.int(unsafe { LLVMGetIntTypeWidth(ty) }),
+            #[cfg(feature = "llvm-14-or-lower")]
             LLVMTypeKind::LLVMPointerTypeKind => {
                 let pointee_type = self.type_from_llvm_ref(unsafe { LLVMGetElementType(ty) });
                 self.pointer_in_addr_space(pointee_type, unsafe { LLVMGetPointerAddressSpace(ty) })
             },
+            #[cfg(feature = "llvm-15-or-greater")]
+            LLVMTypeKind::LLVMPointerTypeKind => {
+                self.pointer_in_addr_space(unsafe { LLVMGetPointerAddressSpace(ty) })
+            },
             LLVMTypeKind::LLVMArrayTypeKind => {
                 let element_type = self.type_from_llvm_ref(unsafe { LLVMGetElementType(ty) });
-                self.array_of(element_type, unsafe { LLVMGetArrayLength(ty) as usize })
+                
+                // LLVMGetArrayLength2 was added in LLVM-17: the old function still exists there,
+                // but is deprecated. The parameters are the same, but the return type is changed
+                // from c_uint to u64
+                #[cfg(feature = "llvm-16-or-lower")]
+                let array_len = unsafe { LLVMGetArrayLength(ty) as usize };
+                #[cfg(feature = "llvm-17-or-greater")]
+                let array_len = unsafe { LLVMGetArrayLength2(ty) as usize };
+                
+                self.array_of(element_type, array_len)
             },
             LLVMTypeKind::LLVMVectorTypeKind => {
                 let element_type = self.type_from_llvm_ref(unsafe { LLVMGetElementType(ty) });
@@ -1027,6 +1148,8 @@ impl TypesBuilder {
             LLVMTypeKind::LLVMMetadataTypeKind => self.metadata_type(),
             LLVMTypeKind::LLVMLabelTypeKind => self.label_type(),
             LLVMTypeKind::LLVMTokenTypeKind => self.token_type(),
+            #[cfg(feature = "llvm-16-or-greater")]
+            LLVMTypeKind::LLVMTargetExtTypeKind => self.target_ext_type(),
         }
     }
 

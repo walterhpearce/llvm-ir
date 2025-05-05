@@ -45,7 +45,6 @@ macro_rules! wrap_with_len {
     };
 }
 
-#[cfg(feature = "llvm-9-or-greater")]
 macro_rules! wrap_with_len_maybe_null {
     ($llvmFunc:ident, $argty:ty, $wrapperFunc:ident) => {
         pub unsafe fn $wrapperFunc(arg: $argty) -> Option<String> {
@@ -87,13 +86,23 @@ wrap_with_len!(
     LLVMAttributeRef,
     get_string_attribute_value
 );
-#[cfg(feature = "llvm-9-or-greater")]
 wrap_with_len_maybe_null!(LLVMGetDebugLocFilename, LLVMValueRef, get_debugloc_filename);
-#[cfg(feature = "llvm-9-or-greater")]
 wrap_with_len_maybe_null!(
     LLVMGetDebugLocDirectory,
     LLVMValueRef,
     get_debugloc_directory
+);
+#[cfg(feature = "llvm-18-or-greater")]
+wrap_with_len!(
+    LLVMGetInlineAsmAsmString,
+    LLVMValueRef,
+    get_inline_asm_asm_string
+);
+#[cfg(feature = "llvm-18-or-greater")]
+wrap_with_len!(
+    LLVMGetInlineAsmConstraintString,
+    LLVMValueRef,
+    get_inline_asm_constraint_string
 );
 
 // Panics if the LLVMValueRef is not a basic block
