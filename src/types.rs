@@ -1142,6 +1142,8 @@ impl TypesBuilder {
             LLVMTypeKind::LLVMFP128TypeKind => self.fp(FPType::FP128),
             LLVMTypeKind::LLVMX86_FP80TypeKind => self.fp(FPType::X86_FP80),
             LLVMTypeKind::LLVMPPC_FP128TypeKind => self.fp(FPType::PPC_FP128),
+            // The x86_mmx type was removed in LLVM 20; its enum slot was dropped from the C API in 22.
+            #[cfg(feature = "llvm-21-or-lower")]
             LLVMTypeKind::LLVMX86_MMXTypeKind => self.x86_mmx(),
             #[cfg(feature = "llvm-12-or-greater")]
             LLVMTypeKind::LLVMX86_AMXTypeKind => self.x86_amx(),

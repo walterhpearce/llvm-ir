@@ -661,11 +661,17 @@ impl AttributesData {
             "memory"
         ]
         .iter()
-        .map(|&attrname| {
+        .filter_map(|&attrname| {
             let cstr = CString::new(attrname).unwrap();
             let kind = unsafe { LLVMGetEnumAttributeKindForName(cstr.as_ptr(), attrname.len()) };
-            assert_ne!(kind, 0, "Function attribute {:?} not found", attrname);
-            (kind, attrname.into())
+            if kind == 0 {
+                // Attributes come and go between LLVM releases (e.g. `nocapture` was replaced by
+                // `captures` in LLVM 21). When linked against a newer LLVM than the selected
+                // feature, skip unknown names instead of aborting.
+                log::debug!("Function attribute {:?} not known to this LLVM; skipping", attrname);
+                return None;
+            }
+            Some((kind, attrname.into()))
         })
         .collect();
         let param_attribute_names = [
@@ -693,11 +699,14 @@ impl AttributesData {
             "noundef",
         ]
         .iter()
-        .map(|&attrname| {
+        .filter_map(|&attrname| {
             let cstr = CString::new(attrname).unwrap();
             let kind = unsafe { LLVMGetEnumAttributeKindForName(cstr.as_ptr(), attrname.len()) };
-            assert_ne!(kind, 0, "Parameter attribute {:?} not found", attrname);
-            (kind, attrname.into())
+            if kind == 0 {
+                log::debug!("Parameter attribute {:?} not known to this LLVM; skipping", attrname);
+                return None;
+            }
+            Some((kind, attrname.into()))
         })
         .collect();
         Self {

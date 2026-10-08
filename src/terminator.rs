@@ -768,6 +768,12 @@ impl Switch {
                             .expect("Failed to find switch destination in map")
                             .clone()
                     });
+                // LLVM 22 stopped storing case values as operands and added an accessor.
+                #[cfg(feature = "llvm-22-or-greater")]
+                let dest_vals = (1 .. num_dests).map(|i| {
+                    Constant::from_llvm_ref(unsafe { LLVMGetSwitchCaseValue(term, i) }, ctx)
+                });
+                #[cfg(not(feature = "llvm-22-or-greater"))]
                 let dest_vals = (1 .. num_dests).map(|i| {
                     Constant::from_llvm_ref(unsafe { LLVMGetOperand(term, 2 * i) }, ctx)
                     // 2*i because empirically, operand 1 is the default dest, and operands 3/5/7/etc are the successor blocks
